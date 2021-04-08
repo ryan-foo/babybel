@@ -1875,8 +1875,19 @@ def setup_environment():
     d_env = Env()
     generate_primitives(primitives)
 
-repl()
+if __name__ == "__main__":
+    repl()
+else:
+    g = Reader()
+    setup_environment()
 
+def test(test_string):
+    test = g.get_sexpr(test_string)
+    print("test: %s" % (test))
+    result = eval(test, bel_nil)
+    print("result of eval on test: %s \n" % (result))
+    return result
+    
 '''
 EOF
 '''

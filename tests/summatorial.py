@@ -1,6 +1,7 @@
 import sys
-sys.path.append('../')
-from babybel import *
+sys.path.append('../src/')
+from eval import *
+from eval_test import *
 
 '''
 ;;; summatorial.bel

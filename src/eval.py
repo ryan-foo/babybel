@@ -1,33 +1,24 @@
-''' 
-beginning of babybel.py
-8th Apr 2021
-A tail-recursive interpreter for Babybel, written in Python
-
-Ryan Foo
-Supervised by Professor Olivier Danvy
-'''
-
-'''
-SECTIONS:
-(0) Misc
-(1) Reader
-(2) Interpreter
-(3) REPL
-'''
-
-'''
-MISC
-
-Useful constants, et al.
-'''
-
+import functools
 from enum import Enum
 import random
 import sys
 import string
 import types
+import re
 import traceback
 import math
+import operator as op
+
+'''
+BABYBEL
+'''
+
+# Beyond my advisor, Professor Olivier Danvy, who has provided me guidance beyond compare, I give my thanks to Lucas Vieira, who implemented Believe (C), and William Annis, who implemented PyLisp, for fortifying my understand of interpreters for Lisp languages.
+
+
+'''
+Useful Constants
+'''
 
 debug = True
 SYMBOLCANDIDATES = string.digits + string.ascii_letters + '-+*/:&$?='
@@ -37,131 +28,27 @@ WS = string.whitespace
 SPECIAL = "()`',@"
 SYNTAX = WS + SPECIAL
 
-'''
-READER
-'''
+INT = re.compile(r'^[+-]?\d+$')
+FLOAT = re.compile(r'^[+-]?(\d+\.\d*$|\d*\.\d+$)')
+
+_nummap = {
+    INT: int,
+    FLOAT: float
+}
 
 '''
-The job of the parser is to extract an abstract syntax tree,
-which we can then pass to eval.
-
-Adapted from William Annis's PyLisp reader, 
-on his website (biostat.wisc.edu).
+Axioms
 '''
 
-class Reader:
-    def __init__(self, str=None):
-        self.str = str
-        self.i = 0
-        self.len = 0
-        self.sexpr = []
-        self.pounds = {}
 
-        if str:
-            self.sexpr = self.get_sexpr()
 
-    def add_pound_helper(self, char, helper):
-        self.pounds[char] = helper
-
-    def get_token(self):
-        if self.i >= self.len:
-            return None
-
-        while self.i < self.len and self.str[self.i] in WS:
-            self.i = self.i + 1
-
-        if self.i == self.len:
-            return None
-
-        # Now, tokenize.
-        if self.str[self.i] == '#':
-            self.i = self.i + 2
-            return self.pounds[self.str[self.i - 1]](self.get_token())
-        if self.str[self.i] in SPECIAL:
-            self.i = self.i + 1
-            return self.str[self.i - 1]
-        elif self.str[self.i] == '"':
-            # Parse a string.
-            str = ""
-            self.i = self.i + 1
-            while self.str[self.i] != '"' and self.i < self.len:
-                if self.str[self.i] == '\\':
-                    self.i = self.i + 1
-                    spchar = self.str[self.i]
-                    if spchar == "n":
-                        str = str + "\n"
-                    elif spchar == "t":
-                        str = str + "\t"
-                else:
-                    str = str + self.str[self.i]
-                self.i = self.i + 1
-            self.i = self.i + 1
-            return String(str)
-        else:
-            tok = ""
-            # First, build the token.
-            while self.i < self.len - 1:
-                if self.str[self.i] in SYNTAX:
-                    break
-                else:
-                    tok = tok + self.str[self.i]
-                    self.i = self.i + 1
-
-            if not self.str[self.i] in SYNTAX:
-                tok = tok + self.str[self.i]
-                self.i = self.i + 1
-            try:
-                tok = int(tok)
-            except:
-                pass
-            if isinstance(tok, int) or isinstance(tok, float):
-                tok = Number(tok)
-            else:
-                tok = Symbol(tok)
-
-            return tok
-
-    def get_sexpr(self, str=None):
-        if str:
-            self.i = 0
-            self.str = str
-            self.len = len(self.str)
-        '''
-        expr: a Python list of Bel expressions.
-        '''
-        expr = None
-        tok = self.get_token()
-        if tok == ')':
-            raise SyntaxError("Unexpected ')'")
-        elif tok == "(":
-            expr = []
-            tok = self.get_token()
-            while tok != ")":
-                if tok == '(':
-                    self.i = self.i - 1
-                    expr.append(self.get_sexpr())
-                elif tok == "'":
-                    expr.append(make_list(Symbol("quote"), self.get_sexpr()))
-                elif tok == "`":
-                    expr.append(make_list(Symbol("iquote"), self.get_sexpr()))
-                elif tok == None:
-                    raise SyntaxError("unexpected end of expression")
-                else:
-                    if isinstance(tok, int) or isinstance(tok, float):
-                        tok = Number(tok)
-                    expr.append(tok)
-
-                tok = self.get_token()
-            return make_list(*expr)
-        elif tok == "'":
-            return make_list(Symbol("quote"), self.get_sexpr())
-        elif tok == "`":
-            return make_list(Symbol("iquote"), self.get_sexpr())
-        else:
-            return tok
+symbol_table = {}
+g_env = symbol_table
 
 '''
-INTERPRETER
+A list of all characters. Its elements are of the form (c . b), where
+c is a character and b is its binary representation in the form of a 
+string of \1 and \0 characters.
 '''
 
 chars_char = SYMBOLCANDIDATES
@@ -200,6 +87,8 @@ class BelType():
             return "pair"
         if isinstance(self, Pair):
             return "pair"
+        if isinstance(self, List):
+            return "pair"
         else:
             raise TypeError("This is not a Bel type.")
 
@@ -216,6 +105,7 @@ class BelType():
         else:
             raise TypeError("Not a Bel Type.")
 
+
 '''
 PRINTING AND READING
 '''
@@ -231,6 +121,7 @@ def print_val(v):
         raise TypeError("Not a Bel Type.")
 
 class Atom(BelType):
+
     '''
     Abstract class to inherit from. Atoms are always true, unless if they're nil.
     Everything in Bel is an Atom, except Pairs.
@@ -245,14 +136,32 @@ class Atom(BelType):
         else:
             return True
 
+
 class Symbol(Atom):
-    def __init__(self, name):
+    '''
+    There is the fact that it is a symbol,
+    then it's the name.
+
+    Symbol, by default you can initialize with nil.
+    Alternative: special value, you can look at which
+    it's bound to undefined.
+    '''
+    def __init__(self, name, value = None):
         if [char in SYMBOLCANDIDATES for char in name]:
         # When we instantiate a symbol, every char within that symbol should be a valid symbol.
             self.n = name # variable
-            self.v = None # value
+            self._val = value # value, ideally we'd initialize to the Bel nil symbol, but we don't have recursive typing in Python.
+            # you look up using the python string value of the symbol, not the symbol itself. key difference.
             if name not in symbol_table: #Update symbol table if its not there.
                 symbol_table[self.n] = self.v
+
+    @property
+    def v(self):
+        if self.n == "nil":
+            return self
+        elif self._val is None:
+            return Symbol("nil")
+        return self._v
 
     def __repr__(self):
         return self.n
@@ -278,27 +187,34 @@ class Symbol(Atom):
         else:
             return True
 
+    def eq(self, other):
+        return self.n == other.n
+
+
 class Char(Atom):
+    '''
+    A character is a 8-bit integer. We care about their bit representation.
+    They look like this, and we eventually want a table that looks like this.
+    The nice thing is we already have them in that representation, up top.
+    '''
+
     def __init__(self, name):
-        if __name__ in CHARCANDIDATES:
+        # if __name__ in CHARCANDIDATES:
             self.n = name
 
     def __repr__(self):
         return self.n
 
     def cons(self, item):
-        return Pair(item, self)    
-
-'''
-AXIOM SYMBOLS
-'''
-
-symbol_table = {}
+        '''
+        Stick yourself on the back of an item, and that becomes a pair.
+        '''
+        return Pair(item, self)
+    
 
 bel_nil = Symbol("nil")
 bel_t = Symbol("t")
 bel_o = Symbol("o")
-bel_apply = Symbol("apply")
 bel_lit = Symbol("lit")
 bel_prim = Symbol("prim")
 bel_clo = Symbol("clo")
@@ -306,8 +222,10 @@ bel_clo = Symbol("clo")
 symbol_table["nil"] = Symbol("nil")
 symbol_table["t"] = Symbol("t")
 symbol_table["o"] = Symbol("o")
-symbol_table["apply"] = Symbol("apply")
 symbol_table["chars"] = chars
+
+
+# Numbers are not a fundamental Bel type, but implementing them as a Bel type makes our job a lot easier. // Believe
 
 class Number(Atom):
     def __init__(self, value):
@@ -374,13 +292,45 @@ class Number(Atom):
             return self.v / other.v
     __rtruediv__ = __truediv__
 
+# We don't ask too many questions about what you put in a pair, so long as its a Bel Type.
+
 class Pair(BelType):
     def __init__(self, a = bel_nil, d = bel_nil):
+        '''
+        TODO: We temporarily get rid of the type checking for Bel types because we create environment with Python functions in the variables.
+        '''
+        # if (a.isbeltype()) and (d.isbeltype()):
         self.a = a
         self.d = d
+        # else:
+        #     raise TypeError("Type not assigned, please instantiate pair with a BelType")
 
     def __repr__(self):
+        '''
+        Print the car of the pair.
+        Then look at the cdr of the pair.
+            If the cdr of the pair is nil, print ')' and stop.
+            If the cdr is an atom, print a dot, then print that atom.
+            Otherwise, you write a space and parantheses, print the car.
+            And then recursively call repr again.
+        '''
         return "(%s)" % print_pair_aux(self.a, self.d)
+
+    def __rawrepr__(self):
+        '''
+        Dot notation
+        '''
+        if self.d == bel_nil:
+            return "(%s)" % (self.a, self.d)
+        else:
+            if numberp(self.a) and numberp(self.d):
+                return "(%s . %s)" % (self.a.v, self.d.v)
+            elif numberp(self.a):
+                return "(%s . %s)" % (self.a.v, self.d)
+            elif numberp(self.d):
+                return "(%s . %s)" % (self.a, self.d)
+            else:
+                return "(%s . %s)" % (self.a, self.d)
 
     def replacea(self, val):
         if val.isbeltype():
@@ -428,17 +378,54 @@ def print_pair_aux(a, d):
     else:
         return ("%s %s") % (a, print_pair_aux(d.a, d.d))
 
+
 class String(BelType):
     '''
     A string is a list, where all the args are chars.
+    But since we don't have a notion of chars at the moment,
+    we will just implement string as its own type.
     '''
     def __init__(self, string):
         self.str = make_string(string)
+        
+    '''
+    Ryan will not fuss with characters that much, Bel String is fine and its a great time saver.
+
+    We can have a print_string to get it in our desired representation to the external user if we want to.
+    '''
+
+    '''
+    A proper list of characters is called a string, and has a special notation,
+    zero or more characters within double quotes.
+
+    "hello world" is a string.
+    "hello" is a string.
+    "" is a string.
+    (\a \b \c) is a string, which can be represented as "abc".
+
+    (Question: And the challenge of \backslash comes in!)
+    (Thought (QUESTION): Since \ or backslash is already a reserved keyword in Python, we can do as well to use # instead?)
+
+    Answer: it's up to the language implementer what the # character is.
+    
+    Strings evaluate to themselves.
+    '''
+
+# Streams are non-critical for our exploration purposes.
 
 class Stream(BelType):
     def __init__(self, status):
         status = status
         raise NameError("Unimplemented")
+
+    # Pointer to a raw stream
+    # The cache of the stream
+    # The amount of the stream that is full.
+
+class StreamStatus(Enum):
+    CLOSED = 1
+    READ = 2
+    WRITE = 3
 
 '''
 Predicates
@@ -470,9 +457,6 @@ def idp(x: BelType, y: BelType):
     '''
     If they are different types,
     then return false.
-
-    Otherwise, check their value,
-    or check their space in memory (is).
     '''
     if (x.isbeltype() and y.isbeltype()) and (type(x) == type(y)):
         if symbolp(x):
@@ -488,6 +472,17 @@ def idp(x: BelType, y: BelType):
             return False
         else:
             raise TypeError("Identity can only be called on Bel types")
+
+def errorp(x: BelType):
+    # Tests if an object is a list in the format (lit err . rest)
+    if not pairp(x):
+        return 0
+    if not idp(x.a, Symbol("lit")):
+        return 0
+    cdr = x.d
+    if not idp(cdr.a, Symbol("err")):
+        return 0
+    return 1
 
 def proper_listp(x: BelType):
     '''
@@ -507,6 +502,16 @@ def proper_listp(x: BelType):
         if not pairp(itr):
             return bel_nil
         itr = itr.d
+
+        '''
+        Maybe termination error?
+
+        Ages ago, Prof Danvy talked to JMC about the first implementation of Lisp. 0, False, or something else.
+
+        Anything that can be used will be abused.
+
+        You face these kind of choices.
+        '''
 
     return 1
 
@@ -559,7 +564,7 @@ def primitivep(x: BelType):
     Is it a primitive?
     - Primitive: second element of the list is the symbol "prim".
     '''
-    return literalp(x) and idp(x.d.a, Symbol("prim"))
+    return (literalp(x) and idp(x.d.a, Symbol("prim")))
 
 def closurep(x: BelType):
     '''
@@ -578,18 +583,7 @@ def quotep(x: BelType):
 
     return idp(x.a, Symbol("quote"))
 
-'''
-Symbol table and symbols
-
-We implement the symbol table as a Python dictionary.
-'''
-
-
-'''
-Pairs and functions that operate on them
-'''
-
-# Takes multiple args and constructs a Bel List. But these multiple args are NOT passed as a Python list. Esxample: make_list(1, 2, 3) -> the Bel list (1 2 3)
+# Takes multiple args and constructs a Bel List. But these multiple args are NOT a list.
 def make_list(*args):
     '''
     * is the unpacking operator, and will construct
@@ -613,7 +607,7 @@ def make_string(string):
     n = len(string)
 
     if (n == 0):
-        return Symbol("nil");
+        return bel_nil;
 
     # Strings are represented internally as a Bel List of characters. We will make a list of chars.
     # We use the list comprehension to transform string into a Python list of Bel chars.
@@ -645,6 +639,12 @@ def bel_to_python_string(string):
             itr = itr.d
     return res
 
+# TODO: Streams
+
+# Error has no formal specification in Bel, other than "there might be an err function which throws an error in the system".
+
+# TODO: Specify and implement errors.
+
 class Env():
     '''
     An environment is a list of pairs, and each pair (var . val) is the binding of a symbol var to the value val.
@@ -661,8 +661,14 @@ class Env():
         So printing an environment is either the same 
         as printing out a list, or printing out an empty
         list, aka bel_nil.
+
+        TODO
+
         '''
         if self.e == bel_nil:
+            '''
+            The empty list.
+            '''
             return "%s" % (bel_nil)
         else:
             '''
@@ -695,6 +701,12 @@ def env_lookup(env, symbol):
     if nilp(env.e):
         return (bel_nil, False)
 
+        '''
+        Calling nilp on env isn't enough,
+        we have to check inside it, and
+        ask it to tell us what env.e is.
+        '''
+
     elif atomp(env.e):
         return (bel_nil, False)
 
@@ -704,6 +716,7 @@ def env_lookup(env, symbol):
     else:
         itr = env.e
         while (not nilp(itr)):
+            # While we have not hit the end of the env.
             cand = itr.a
             # The candidate pair is the first var /val pair of the iterator. If var is the symbol we are looking for, then return it's associated val. Otherwise, continue down the list.
             if (symbolp(cand.a) and idp(symbol, cand.a)):
@@ -729,7 +742,9 @@ def lookup(l_env, symbol):
 
     How
 
-    - lookup in the lexical scope and dynamic scope, we can use an association list because environments tend to be small.
+    - lookup in the lexical scope and dynamic scope, we can use an association list because they tend to be small and you don't have to hold them
+        - the assoc list is a time-honored tradition to represent environments (Danvy)
+        - not the most efficient space-wise. In practice, variables should be compiled into their lexical offset (or how far they are in the lexical environment.)
     - Global environment
         - Direct access in a table (the symbol table is implemented as a hash table), so we can access those variables in constant time.
     '''
@@ -742,6 +757,8 @@ def lookup(l_env, symbol):
     # Lexical scope
     value, found = env_lookup(l_env, symbol)
     if found:
+        # print("%s is in the lexical environment!" % symbol)
+        # print("Here is it's value: %s" % value)
         return value
 
     # Global scope
@@ -803,7 +820,7 @@ def make_literal(rest):
 Primitives are literals.
 '''
 
-# LIST OF PRIMITIVES
+# LIST OF PRIMITIVES (LOP)
 
 def make_primitive(symbol):
     return make_literal(Pair(bel_prim, Pair(symbol, bel_nil)))
@@ -816,7 +833,7 @@ def register_primitive_in_env(x):
     symbol = Symbol(x)
     symbol_table[x] = make_primitive(symbol)
 
-primitives = ["id", "join", "car", "cdr", "type", "xar", "xdr", "sym", "nom", "wrb", "rdb", "ops", "cls", "stat", "coin", "sys", "+", "-", "*", "/", "<", "<=", ">", ">=", "=", "err", "define", "def", "apply", "pair?", "cons", "g_env", "apply"]
+primitives = ["id", "join", "car", "cdr", "type", "xar", "xdr", "sym", "nom", "wrb", "rdb", "ops", "cls", "stat", "coin", "sys", "+", "-", "*", "/", "<", "<=", ">", ">=", "=", "err", "pair?", "cons", "g_env", "apply"]
 
 def generate_primitives(primitives):
     for primitive in primitives:
@@ -834,10 +851,17 @@ def make_closure(l_env, rest):
 
 '''
 EVALUATION
+
+Metacircular evaluator
+- we have eval and apply,
+and they call themselves mutually,
+they will have auxillary functions
+and special forms to produce
+a working interpreter for a Lisp.
 '''
 
 '''
-eval, or the evaluation function, takes an expression, identifies what it is, and evaluates it.
+eval, or the evaluation function, takes an expression, identifies what it is, and executes it accordingly.
 
 When a simple application is performed, we take a list and consider the first element the symbol that the function is bound to.
 
@@ -847,6 +871,10 @@ The closure captures the lexical env of when it is evaluated.
 '''
 
 def eval(exp, l_env):
+    # if not (isinstance(exp, BelType)):
+        # raise TypeError("%s is Not a Bel Type" % exp)
+    # print("Expression being evaluated: %s" % exp)
+    # print("Lexical environment: %s" % l_env)
 
     if numberp(exp):
         return exp
@@ -877,7 +905,7 @@ def eval(exp, l_env):
 
         elif idp(exp.a, Symbol("if")):
             # print("Special If")
-            # We will call special_if on the cdr of the expr, since we already know that it's a pair, and that the first half of the pair is if.
+            # We will call special_if on the cdr of the expr, since we already know that it's a pair, and that the first half of the pair is if..
             # We will eval_tp on the same expression,
             # trusting eval_tp to handle it with an iterative
             # approach.
@@ -890,7 +918,8 @@ def eval(exp, l_env):
             return special_set(exp.d, l_env)
 
         elif idp(exp.a, Symbol("def")):
-            return special_set(exp.d, l_env)
+            print("yes, special def")
+            return special_def(exp.d, l_env)
 
         # Otherwise it is an application of a function.
         else:
@@ -900,15 +929,16 @@ def eval(exp, l_env):
             manner.
             Instead, we call eval_tp, which evaluates
             the body of a closure. This instantiates
-            a while loop.
+            a while loop that...
             '''
             return function_apply(eval(exp.a, l_env),
                      eval_list(exp.d, l_env))
 
     raise Error("%d is not a proper list, you cannot apply a function." % exp)
 
+
 '''
-eval_tp is a function that ensures proper tail recursion of eval,
+eval_tp is a new function,
 that is called to evaluate the body of a closure.
 
 A Bel expression is ordinarily evaluated through recursive calls to eval,
@@ -918,6 +948,9 @@ of the while loop in eval_tp.
 
 def eval_tp(exp, l_env):
     while(True):
+        # print("Eval TP")
+        # print("Expression being evaluated: %s" % exp)
+        # print("Lexical environment: %s" % l_env)
         if numberp(exp):
             return exp
 
@@ -946,9 +979,13 @@ def eval_tp(exp, l_env):
                 return make_closure(l_env, exp.d)
 
             elif idp(exp.a, Symbol("if")):
+                '''
+                Test
+                '''
                 body = exp.d
 
                 if nilp(body.d):
+                    # Then it's car is the final else branch of the if expression.
                     exp = body.a
                     continue
 
@@ -960,12 +997,20 @@ def eval_tp(exp, l_env):
                     # The car of that pair is the test, and the cadr is the consequent branch.
                     test = body.a
                     conseq = body.d.a
+                    # print("IF: test: %s" % test)
+                    # print("IF: conseq: %s" % conseq)
+
                     # We evaluate the test, with a non-tail call to eval.
                     if not nilp(eval(test, l_env)):
+                        # print("Eval the consequent. We have passed the test.")
                         # If the test evaluates to a truthy value (not nil), then return evaluation of the consequent.
                         exp = conseq
                         continue
+                    # Otherwise, we tail call eval on the cadr on the pair, or the then branch.
                     else:
+                        # print("Tail call on the else* branch.")
+                        # Else* branch.
+                        # print("Else branch: %s" % body.d.d)
                         if nilp(body.d.d.d):
                             exp = body.d.d.a # Else branch: exp
                             continue
@@ -973,6 +1018,9 @@ def eval_tp(exp, l_env):
                             # The if-then-else is not finished, so construct an if expression.
                             exp = Pair(Symbol("if"), body.d.d)
                             continue
+                        '''
+                        It iteratively treats the if.
+                        '''
 
             elif idp(exp.a, Symbol("set")):
                 return special_set(exp.d, l_env)
@@ -980,72 +1028,66 @@ def eval_tp(exp, l_env):
             elif idp(exp.a, Symbol("define")):
                 return special_set(exp.d, l_env)
 
+            elif idp(exp.a, Symbol("def")):
+                return special_def(exp.d, l_env)
+                '''
+                def: function definition
+                (def n p e)
+                is an abbreviation for
+                (set n (lit clo nil p e))
+                '''
+
             # Otherwise it is an application of a function.
             else:
+                '''
+                Anything that calls eval recursively
+                will not be done in a straight recursive 
+                manner.
+                Instead, we call eval_tp, which evaluates
+                the body of a closure. This instantiates
+                a while loop.
+
+                '''
                 fun = eval(exp.a, l_env)
                 args = eval_list(exp.d, l_env)
 
-                if primitivep(fun):
-                    '''
-                    Function could be predefined (Primitives),
-                    in which case:
-                    they are applied to lists of Bel values
-                    - the arity is checked
-                    - each argument is fetched from args [a Bel List]
-                    types are tested
-                    the actual values are extracted from each value
-                    the operation at hand is carried out on the values
-                    we formulate a new result
-                    '''
+                a_fun = fun
+                a_args = args
 
-                    if fun.d.d.a == "apply":
-                        arity_check(args, 2)
-                        a_fun = args.a
-                        a_args = args.d.a
+                while (primitivep(a_fun) and (idp(a_fun.d.d.a, Symbol("apply")))):
+                    arity_check(a_args, 2)
+                    a_fun = a_args.a
+                    a_args = a_args.d.a
 
-                        while(True):
-                            if closurep(a_fun):
-                                l_env = a_fun.d.d.a # current lexical environment
-                                params = a_fun.d.d.d.a # actual parameters
-                                body = a_fun.d.d.d.d.a # function body (value that the fn returns)
-                                new_env = Env(bind(params, a_args, l_env))
+                if closurep(a_fun):
+                    l_env = a_fun.d.d.a # current lexical environment
+                    params = a_fun.d.d.d.a # actual parameters
+                    body = a_fun.d.d.d.d.a # function body (value that the fn returns)
+                    new_env = Env(bind(params, a_args, l_env))
+                    exp = body
+                    l_env = new_env
 
-                                exp = body
-                                l_env = new_env
-                                break
-
-                            elif (primitivep(a_fun) and a_fun.d.d.a != "apply"):
-                                return apply_primitive(
-                                    a_fun.d.d.a, a_args)
-
-                            else:
-                                arity_check(a_args, 2)
-                                a_fun = a_args.a
-                                a_args = a_args.d.a
-                                continue
-
-                    else:
-                        return apply_primitive(fun.d.d.a, args)
-
-                elif closurep(fun):
-                    '''
-                    When we apply a closure, we fetch it's first lexical environment.
-                    Then we fetch the actual parameters.
-                    Then we extend the new environment using params and args.
-                    '''
-                    l_env_prime = fun.d.d.a # current lexical environment
-                    params = fun.d.d.d.a # actual parameters
-                    l_env = Env(bind(params, args, l_env_prime)) # args: formal parameters.
-                    # this gives us the new lexical environment to evaluate exp in.
-                    exp = fun.d.d.d.d.a # expression, function body (value that the fn returns)
-                    continue
+                elif primitivep(a_fun):  # guaranteed not to be apply
+                    return apply_primitive(a_fun.d.d.a, a_args)
 
                 else:
-                    raise TypeError("Not a function")
+                   raise TypeError("Not a function")
 
-    raise TypeError("%d is an unidentified function object (UFO)." % exp)
+        else: 
+            raise TypeError("%d is an unidentified function object (UFO)." % exp)
+
+'''
+APPLY
+
+"is the application function. It takes a function and applies that to the list of evaluated arguments.
+
+A function can be a primitive but also a literal closure.
+
+We bind arguments to the formal parameters, create an extended environment, and evaluate under the new environment."
+'''
 
 def bind(params, args, l_env):
+    # print("Lexical Env: %s" % l_env)
     '''
     Args is a list of values.
     If param is a symbol,
@@ -1072,6 +1114,14 @@ def bind(params, args, l_env):
         else:
             raise SyntaxError("Illegal formal -- formal needs to be a symbol")
 
+            '''
+            DECISION POINT: (potential point for heated discussion)
+                Arity mismatch: not enough args.
+                Or we could pad them / bind them with nil.
+                Or if there are too many args, we can ignore them.
+            "Worse is Better vs The Right Thing"
+            '''
+
     elif nilp(params):
         if nilp(args):
             return l_env
@@ -1082,6 +1132,7 @@ def bind(params, args, l_env):
         raise SyntaxError("Illegal formal -- formal needs to be a pair or a symbol")
 
 def function_apply(fun, args):
+
     if primitivep(fun):
         '''
         Function could be predefined (Primitives),
@@ -1093,8 +1144,10 @@ def function_apply(fun, args):
         the actual values are extracted from each value
         the operation at hand is carried out on the values
         we formulate a new result
-        '''
 
+        We create a new function class that performs
+        the arity check.
+        '''
         return apply_primitive(
             fun.d.d.a, args)
 
@@ -1102,14 +1155,18 @@ def function_apply(fun, args):
         l_env = fun.d.d.a # current lexical environment
         params = fun.d.d.d.a # actual parameters
         body = fun.d.d.d.d.a # function body (value that the fn returns)
+
         new_env = Env(bind(params, args, l_env))
+
+        if errorp(new_env):
+            return new_env
 
         return eval_tp(body, new_env) # evaluate the body given the new extended environment
 
     else:
         raise TypeError("Not a function")
 
-
+@functools.lru_cache(maxsize=None)
 def eval_list(bel_list, l_env):
     if nilp(bel_list):
         return bel_nil
@@ -1120,6 +1177,32 @@ def eval_list(bel_list, l_env):
 
     return Pair(eval_head, eval_rest)
 
+
+'''
+when do we stop evaluating? - we stop when we hit nil.
+if we hit nil, we add nil to our list, break.
+otherwise, we continue evaluating the head of to_eval,
+and adding that to our existing construction (eval_result). 
+(we construct the evaluated list on the fly).
+'''
+
+@functools.lru_cache(maxsize=None)
+def eval_list_tp(bel_list, l_env):
+    eval_result = eval(bel_list.a, l_env)
+    to_eval = bel_list.d
+    while(True):
+        if nilp(to_eval):
+            eval_result = Pair(eval_result, bel_nil)
+            break
+        else:
+            print("to eval: %s" % to_eval)
+            eval_result = Pair(eval_result, eval(to_eval.a, l_env))
+            to_eval = to_eval.d # proceed down the list
+            print("to eval after .d: %s" % to_eval)
+            continue
+    return eval_result
+
+
 '''
 PRIMITIVE FUNCTIONS
 
@@ -1127,6 +1210,12 @@ When you look up these symbols (id, join, '+' -- you are returned with "lit prim
 '''
 
 def lookup_prim(sym, lit):
+    '''
+    Takes the symbol,
+    and helps point us
+    to the right function
+    to return.
+    '''
     return idp(sym, Symbol(lit))
 
 def arity_check(args, num):
@@ -1142,6 +1231,13 @@ def arity_check(args, num):
     continues to execute.
     If they are not,
     it raises an arity mismatch error and execution stops.
+
+    Possible extension: error-handling could stop at the REPL level,
+    not at the meta-level. Right now we lean on Python's error handling,
+    but in an ideal world we would have implemented native error handling
+    for Bel.
+
+    Hence, we declare the Bel interpreter as not to be used in anger, or a prototype --  (an  expression that tells us that it is not to be used for production level code).
     '''
 
 def apply_primitive(sym, args):
@@ -1198,6 +1294,8 @@ def apply_primitive(sym, args):
     elif lookup_prim(sym, "apply"):
         return prim_apply(args)
     # Babybel Primitives
+    # elif lookup_prim(sym, "list"):
+    #     pass
     elif lookup_prim(sym, "pair?"):
         if pairp(args.a):
             return bel_t
@@ -1280,7 +1378,11 @@ def prim_cons(args):
 
 
 def prim_type(args):
+    # print("Checking type of: %s" % args)
     arity_check(args, 1)
+    if isinstance(args, Pair):
+        args = args.a
+
     if isinstance(args, Symbol):
         return Symbol("symbol")
     elif isinstance(args, Char):
@@ -1297,7 +1399,7 @@ def prim_type(args):
 def prim_xar(args):
     arity_check(args, 2)
     pair = args.a
-    val = args.d.a
+    val = args.d.a # the head, of the rest...
     if not pairp(pair):
         raise TypeError("%s is not a pair" % pair)
     else:
@@ -1307,7 +1409,7 @@ def prim_xar(args):
 def prim_xdr(args):
     arity_check(args, 2)
     pair = args.a
-    val = args.d.a
+    val = args.d.a # the head, of the rest...
     if not pairp(pair):
         raise TypeError("%s is not a pair" % pair)
     else:
@@ -1324,6 +1426,9 @@ def prim_sym(args):
         raise TypeError("%s is not a string." % string)
     python_string = bel_to_python_string(string)
     return Symbol(python_string)
+    '''
+    Unimplemented: Bel to Python String.
+    '''
 
 def prim_nom(args):
     '''
@@ -1349,9 +1454,25 @@ def prim_apply(args):
     is something we can apply. (a primitive
     or a closure)
 
-    The second argument is a Bel list.
+    The second argument is a Bel list. It may not be proper, it doesn't matter.
+
+    The result of eval_list is a Bel list.
 
     Apply the first argument to the second.
+
+    ev_list
+
+    Single fixpoint operator you can apply
+    to any function of any arity...
+    
+    We implement a bounded form of apply
+    that takes two arguments.
+
+    First, we check it takes two args.
+
+    We trust that when we apply the function,
+    whatever we are applying will check its own arguments.
+
     '''
     arity_check(args, 2)
     a_fun = args.a
@@ -1362,15 +1483,24 @@ def prim_apply(args):
             a_fun.d.d.a, a_args)
 
     elif closurep(a_fun):
+        # print("We are in a closure.")
         l_env = a_fun.d.d.a # current lexical environment
         params = a_fun.d.d.d.a # actual parameters
         body = a_fun.d.d.d.d.a # function body (value that the fn returns)
+        # print("Current lexical environment: %s" % l_env)
         new_env = Env(bind(params, a_args, l_env))
+
+        # print("We are evaluating a closure with the body: %s" % body)
+        # print("We are evaluating a closure, with the lexical environment of %s" % new_env)
 
         return eval_tp(body, new_env) # evaluate the body given the new extended environment
 
     else:
         raise TypeError("application of %s in apply: Not a function" % a_fun)
+
+
+
+
 
 '''
 Functions related to streams.
@@ -1478,7 +1608,7 @@ def prim_sub(args):
     If it is a singleton, then invert the value of the single number.
     '''
 
-    # Broken on variadic numbers. 
+    # Broken, fix on variadic numbers. 
 
     if not number_listp(args):
         raise TypeError("Cannot subtract non-numbers.")
@@ -1705,10 +1835,9 @@ def prim_eq(args):
 
     If it is a proper list,
     then traverse the list and compare elements pairwise.
-
-    We have not implemented this yet.
     '''
     if prim_type(args.a) == Symbol("pair"):
+        print("We are comparing a pair")
         if not nilp(args.a.d) and not nilp(args.d.a.d):
             pass
         raise ValueError("Equality of pairs is unimplemented")
@@ -1719,6 +1848,14 @@ def prim_eq(args):
 '''
 OTHER PRIMITIVES
 '''
+
+# With thanks to Luke Vieira for the error format.
+
+def prim_err(args):
+    string = args.a
+    if not stringp(string):
+        return make_error(String("First argument of error must be a string"), bel_nil)
+    return make_error(string, args.d)
 
 def prim_genv(args):
     print(g_env)
@@ -1764,23 +1901,51 @@ def special_quote(exp, l_env):
 
     return exp.d.a
 
+
 def special_if(exp, l_env):
     body = exp
 
     if nilp(body.d):
+        # Then it's car is the final else branch of the if expression.
         return eval(body.a, l_env)
 
     if not pairp(body.d):
         raise SyntaxError("The cdr of this pair has to be a pair.")
 
     else:
+        # If the cdr of the body is a pair, then
+        # The car of that pair is the test, and the cadr is the consequent branch.
         test = body.a
         conseq = body.d.a
 
+        # We evaluate the test, with a non-tail call to eval.
         if not nilp(eval(test, l_env)):
+            # If the test evaluates to a truthy value (not nil), then return evaluation of the consequent.
             return eval(conseq, l_env)
+        # Otherwise, we tail call eval on the cadr on the pair, or the then branch.
         else:
+            # print("Tail call on the then branch.")
+            # Then branch.
+            # print("Then branch: %s" % body.d.d)
             return special_if(body.d.d, l_env)
+
+def special_if_itr(exp, l_env):
+    '''
+    The while loop evaluates the expression denoted by tp.
+
+    At the same level of the control stack,
+    we are moving through the expression.
+
+    The simplest way to make a tail recursive function
+    is to write it iteratively.
+
+    You are only extending the lexical environment,
+    which is temporary until the next call.
+
+    Afterwards, you extend the original lexical environment...
+    '''
+    pass
+
 
 def special_dyn(rest, l_env):
     pass
@@ -1816,15 +1981,35 @@ def special_set(clauses, l_env):
     return bel_nil
 
 
-def special_define(n, p, e):
+def special_def(args, l_env):
     '''
-    (define n p e)
+    (def n p e)
     is an abbreviation for
     (set n (lit clo nil p e))
-
-    special_define is never called. The define primitive is handled by calling set with two parameters.
     '''
-    return 
+    sym = args.a
+    p = args.d.a
+    e = args.d.d.a
+    rest = make_list(p, e)
+    lit_clo = Pair(sym, Pair(make_closure(bel_nil, rest)))
+    return special_set(lit_clo, l_env)
+
+
+def let(bindings, body):
+    '''
+    bindings = ((name . expr) (name . expr) (name . expr))
+    body = 
+    (let ((x 1)) (f x)) = ((fn (x) (f x)) 1)
+    (let ((x 1) (y 2)) (+ x y)) = ((fn (x y) (+ x y)) 1 2)
+
+    The formal (x y) becomes the formals, (x y)
+    the definiens (1 and 2) become the actuals (1 2), or the args
+    The body becomes this body.. etc
+
+    Landin's Correspondence
+    A block structure and function applications mean the same.
+    '''
+    pass
 
 def map_quote(args):
     '''
@@ -1846,48 +2031,4 @@ def map_quote(args):
         '''
         return Pair(Pair(Symbol("quote"), Pair(args.a, bel_nil)), map_quote(args.d))
 
-'''
-REPL
-Inspired by Peter Norvig
-'''
-
-# A prompt-read-eval-print loop.
-
-def repl(prompt='Babybel > '):
-    print("Welcome to Babybel. Type quit to exit the REPL.\n")
-    g = Reader()
-    setup_environment()
-    while True:
-        inpt = input(prompt)
-        try:
-            if inpt == "quit": break
-            val = eval(g.get_sexpr(inpt), l_env)
-            if val is not None: 
-                print(val)
-        except Exception as e:
-                print('%s: %s' % (type(e).__name__, e))
-
-def setup_environment():
-    debug = False
-    symbol_table = {}
-    g_env = symbol_table
-    l_env = Env()
-    d_env = Env()
-    generate_primitives(primitives)
-
-if __name__ == "__main__":
-    repl()
-else:
-    g = Reader()
-    setup_environment()
-
-def test(test_string):
-    test = g.get_sexpr(test_string)
-    print("test: %s" % (test))
-    result = eval(test, bel_nil)
-    print("result of eval on test: %s \n" % (result))
-    return result
-    
-'''
-EOF
-'''
+# EOF

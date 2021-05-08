@@ -1,6 +1,7 @@
 import sys
 sys.path.append('../src/')
 from eval import *
+from reader import *
 from eval_test import *
 
 '''
